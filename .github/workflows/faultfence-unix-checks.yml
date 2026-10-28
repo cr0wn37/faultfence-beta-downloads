@@ -1,0 +1,62 @@
+name: FaultFence Unix add-on checks
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'unix-addons/**'
+      - '.github/workflows/faultfence-unix-checks.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  # macOS hosted runners have Python but normally no local Linux Docker daemon.
+  # Plan-only macOS check is not a full Docker integration test.
+  validate:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Get official beta.2 asset and add Unix files (without editing originals)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release download 'v0.8.0-beta.2' --repo "$GITHUB_REPOSITORY" \
+            --pattern 'FaultFence-Testing-Kit-v0.8.0-beta.2.zip' --dir "$RUNNER_TEMP"
+          mkdir -p "$RUNNER_TEMP/expanded"
+          unzip -q "$RUNNER_TEMP/FaultFence-Testing-Kit-v0.8.0-beta.2.zip" -d "$RUNNER_TEMP/expanded"
+          cp unix-addons/* "$RUNNER_TEMP/expanded/FaultFence-Testing-Kit/"
+          echo "KIT_ROOT=$RUNNER_TEMP/expanded/FaultFence-Testing-Kit" >> "$GITHUB_ENV"
+      - name: Verify original and new file checksums
+        shell: bash
+        run: |
+          cd "$KIT_ROOT"
+          shasum -a 256 -c SHA256SUMS.txt
+          shasum -a 256 -c SHA256SUMS_UNIX_ADDONS.txt
+          bash -n setup.sh try_sample.sh
+      - name: Install Python wheel without Docker (static check)
+        shell: bash
+        run: |
+          cd "$KIT_ROOT"
+          python3 -m venv .venv
+          .venv/bin/python -m pip install --disable-pip-version-check wheel/*.whl
+          .venv/bin/faultfence --help
+          .venv/bin/faultfence validate --project multi-tool-faultfence-agent
+          .venv/bin/faultfence attacks
+          .venv/bin/python RUN_MODEL_UNIX.py --help >/dev/null
+          .venv/bin/python RUN_MODEL_ALL_UNIX.py --project multi-tool-faultfence-agent --attack all --runs 1 --authorized-resource invoice_100 --authorized-quantity 2 --authorized-max-amount 100 --authorized-amount 100 --authorized-currency INR --authorized-units 4 --units-per-pack 2 --requests-file MODEL_BATCH_REQUESTS.example.json --max-agent-runs 11 --plan
+      - name: Linux Docker offline smoke test
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          cd "$KIT_ROOT"
+          bash setup.sh
+          bash try_sample.sh
